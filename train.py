@@ -24,6 +24,9 @@ from einops import rearrange, reduce, repeat
 
 import pdb
 
+import os
+os.environ['CURL_CA_BUNDLE'] = ''
+
 seed_everything(1234, workers=True)
 
 def freeze_params(params):
@@ -47,19 +50,20 @@ class TRYONSystem(LightningModule):
         )
         
         self.FC1 = nn.Sequential(
-            nn.Linear(int((self.hparams.size / 8) * (self.hparams.size / 8)), d_time_emb),
+            nn.Linear(int((self.hparams.size) * (self.hparams.size)), d_time_emb),
             nn.SiLU(),
             nn.Linear(d_time_emb, d_time_emb),
         )
         self.FC2 = nn.Sequential(
-            nn.Linear(int((self.hparams.size / 8) * (self.hparams.size / 8)), d_time_emb),
+            nn.Linear(int((self.hparams.size) * (self.hparams.size)), d_time_emb),
             nn.SiLU(),
             nn.Linear(d_time_emb, d_time_emb),
         )
         
         self.Conv11 = nn.Conv2d(self.hparams.in_channels, 1, 1)
         
-        self.vae = AutoencoderKL.from_pretrained(self.hparams.pretrained_model_name_or_path, subfolder="vae")
+        self.vae = AutoencoderKL(in_channels=4)
+        self.vae.from_pretrained(self.hparams.pretrained_model_name_or_path, subfolder="vae")
         self.UnetA = UnetA128(in_channels=self.hparams.in_channels, 
                               out_channels=self.hparams.out_channels, 
                               channels=self.hparams.channels,
@@ -89,7 +93,7 @@ class TRYONSystem(LightningModule):
         :param max_period: controls the minimum frequency of the embeddings.
         """
         # $\frac{c}{2}$; half the channels are sin and the other half is cos,
-        half = self.channels // 2
+        half = self.hparams.channels // 2
         # $\frac{1}{10000^{\frac{2i}{c}}}$
         frequencies = torch.exp(
             -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
@@ -104,12 +108,12 @@ class TRYONSystem(LightningModule):
         freeze_params(self.vae.parameters())
         
         # person_pose_emd = nn.Conv2d()
-        
+        # pdb.set_trace()
         person_pose_emd = rearrange(self.Conv11(x.person_pose_latents), 'b 1 h w -> b h w')
         person_pose_emd = rearrange(person_pose_emd, 'b h w -> b (h w)')
         person_pose_emd = self.FC1(person_pose_emd)
         
-        garment_pose_emd = rearrange(self.Conv11(x.garment_pose_latents), 'b 1 h w -> b h w)')
+        garment_pose_emd = rearrange(self.Conv11(x.garment_pose_latents), 'b 1 h w -> b h w')
         garment_pose_emd = rearrange(garment_pose_emd, 'b h w -> b (h w)')                                
         garment_pose_emd = self.FC2(garment_pose_emd)
         
@@ -121,6 +125,7 @@ class TRYONSystem(LightningModule):
         z_t = torch.cat([x.noisy_latents,x.agnostic_latents], 1)
         # 三个Unet可以分开训练
         # 1
+        # pdb.set_trace()
         cond = self.UnetB(x.segment_latents, cat_time_emd)
         noise_pred = self.UnetA(z_t, cat_time_emd, cond)
         # 2
@@ -213,7 +218,7 @@ class TRYONSystem(LightningModule):
             'person_pose_latents':person_pose,
             'garment_pose_latents':garment_pose,
         })
-        
+        pdb.set_trace()
         noise_pred = self(x)
         
         loss_mle = F.mse_loss(noise_pred, noise, reduction='none').mean([1, 2, 3]).mean() # mean([1, 2, 3]) 表示对每个样本的所有通道、所有像素点的值求平均，得到一个形状为 (batch_size,) 的张量，其中每个元素表示对应样本的平均值
@@ -224,6 +229,7 @@ class TRYONSystem(LightningModule):
     
     def validation_step(self, batch, batch_idx):
         # Convert images to latent space
+        # pdb.set_trace()
         latents = self.vae.encode(batch['image']).latent_dist.sample().detach()
         latents = latents * 0.18215
         agnostic_latents = self.vae.encode(batch['agnostic']).latent_dist.sample().detach()
@@ -231,17 +237,23 @@ class TRYONSystem(LightningModule):
         segmented_latents = self.vae.encode(batch['segment']).latent_dist.sample().detach()
         segmented_latents = segmented_latents * 0.18215
         
+        person_pose = (self.vae.encode(batch['personpose']).latent_dist.sample().detach()) * 0.18215
+        
+        garment_pose = self.vae.encode(batch['garmentpose']).latent_dist.sample().detach()
+        garment_pose = garment_pose * 0.18215
+        
         # Sample noise then add to the latents
-        noise = torch.randn(latents.shape)
+        noise = torch.randn(latents.shape).to(latents.device)
         batch_size = latents.shape[0]
         
         # Sample a random timestep for each image
         timesteps = torch.randint(
             0, self.noise_scheduler.config.num_train_timesteps, (batch_size,),
-        ).long()
+        ).long().to(latents.device)
         
         # Add noise to the latents according to the noise magnituge at each timestep
         # Forward diffusion process
+        # pdb.set_trace()
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
         
         x = edict({
@@ -250,8 +262,8 @@ class TRYONSystem(LightningModule):
             'segment_latents':segmented_latents,
             # 'down_sample':down_sample_latents,
             'timesteps':timesteps,
-            'person_pose_img':batch['personpose'],
-            'garment_pose_img':batch['garmentpose'],
+            'person_pose_latents':person_pose,
+            'garment_pose_latents':garment_pose,
         })
         
         noise_pred = self(x)
@@ -289,15 +301,14 @@ if __name__ == '__main__':
                     #   callbacks=callbacks,
                       resume_from_checkpoint=hparams.ckpt_path,
                       logger=logger,
-                      early_stop_callback=None,
+                    #   early_stop_callback=None,
                       weights_summary=None,
                       progress_bar_refresh_rate=1,
                       enable_model_summary=True,
                       gpus=hparams.num_gpus,
-                      distributed_backend='ddp' if hparams.num_gpus>1 else None,
+                    #   distributed_backend='ddp' if hparams.num_gpus>1 else None,
                       num_sanity_val_steps=1,
-                      benchmark=True,
-                      profiler=hparams.num_gpus==1)
+                      benchmark=True)
     trainer.fit(tryonsystem)
         
         

@@ -7,6 +7,8 @@ import torch.nn.functional as F
 
 from .unet_attention import SpatialTransformer
 
+import pdb
+
 class GroupNorm32(nn.GroupNorm):
     """
     ### Group normalization with float32 casting
@@ -65,6 +67,22 @@ class ResBlock(nn.Module):
         else:
             self.skip_connection = nn.Conv2d(channels, out_channels, 1)
             
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor):
+        """
+        :param x: is the input feature map with shape `[batch_size, channels, height, width]`
+        :param t_emb: is the time step embeddings of shape `[batch_size, d_t_emb]`
+        """
+        # Initial convolution
+        h = self.in_layers(x)
+        # Time step embeddings
+        t_emb = self.emb_layers(t_emb).type(h.dtype)
+        # Add time step embeddings
+        h = h + t_emb[:, :, None, None]
+        # Final convolution
+        h = self.out_layers(h)
+        # Add skip connection
+        return self.skip_connection(x) + h
+            
 class TimestepEmbedSequential(nn.Sequential):
     """
     ### Sequential block for modules with different inputs
@@ -76,6 +94,7 @@ class TimestepEmbedSequential(nn.Sequential):
     def forward(self, x, t_emb, cond=None):
         for layer in self:
             if isinstance(layer, ResBlock):
+                pdb.set_trace()
                 x = layer(x, t_emb)
             elif isinstance(layer, SpatialTransformer):
                 x = layer(x, cond)
@@ -125,6 +144,15 @@ class UpSample(nn.Module):
         # Apply convolution
         return self.conv(x)
 
+
+class mySequential(nn.Sequential):
+    def forward(self, *inputs):
+        for module in self._modules.values():
+            if type(inputs) == tuple:
+                inputs = module(*inputs)
+            else:
+                inputs = module(inputs)
+        return inputs
 # class Unit(nn.Module):
     
 #     def __init__(
@@ -163,7 +191,7 @@ class UnetA128(nn.Module):
                  in_channels: int,
                  out_channels: int,
                  channels: int,
-                 n_res_blocks: List[int],
+                #  n_res_blocks: List[int],
                 #  attention_levels: List[int],
                  if_down: bool = False,
                 #  channels_multipliers: List[int],
@@ -187,6 +215,7 @@ class UnetA128(nn.Module):
         
         self.channels_multipliers = [1, 2, 4, 4]
         self.attention_levels = [2, 3]
+        n_res_blocks = 3
         
         levels = len(self.channels_multipliers)
         
@@ -199,8 +228,7 @@ class UnetA128(nn.Module):
             nn.Linear(d_time_emb, d_time_emb),
         )
         
-        self.conv = TimestepEmbedSequential(
-            nn.Conv2d(in_channels, channels, 3, padding=1))
+        self.conv = nn.Conv2d(in_channels, channels, 3, padding=1)
         
         self.input_blocks = nn.ModuleList()     
                
@@ -210,8 +238,9 @@ class UnetA128(nn.Module):
         
         for i in range(levels):
             sub_net = nn.ModuleList()
+            # sub_net = mySequential()
 
-            for _ in range(n_res_blocks):
+            for j in range(n_res_blocks):
                 
                 layers = [ResBlock(channels, d_time_emb, out_channels=channels_list[i])]
                 channels = channels_list[i]
@@ -220,9 +249,11 @@ class UnetA128(nn.Module):
                     layers.append(SpatialTransformer(channels, n_heads, tf_layers, d_cond))
                     
                 sub_net.append(TimestepEmbedSequential(*layers))
+                # sub_net.add_module(str(j),TimestepEmbedSequential(*layers))
                 input_block_channels.append(channels)
             if i != levels - 1:
                 sub_net.append(TimestepEmbedSequential(DownSample(channels)))
+                # sub_net.add_module(str(i),TimestepEmbedSequential(DownSample(channels)))
                 input_block_channels.append(channels)
             self.input_blocks.append(sub_net)
             
@@ -238,6 +269,7 @@ class UnetA128(nn.Module):
         
         for i in reversed(range(levels)):
             sub_net = nn.ModuleList()
+            # sub_net = mySequential()
             for j in range(n_res_blocks + 1):
                 layers = [ResBlock(channels + input_block_channels.pop(), d_time_emb, out_channels=channels_list[i])]
                 channels = channels_list[i]
@@ -249,6 +281,7 @@ class UnetA128(nn.Module):
                     layers.append(UpSample(channels))
                     
                 sub_net.append(TimestepEmbedSequential(*layers))
+                # sub_net.add_module(str(j),TimestepEmbedSequential(*layers))
             self.output_blocks.append(sub_net)
                 
         self.out = nn.Sequential(
@@ -285,39 +318,81 @@ class UnetA128(nn.Module):
         # input half
         x = self.conv(x)
         
-        x = self.input_blocks[0](x,cat_t_embs)
-        x_input_block.append(x)
+        now_cond = None
+        for i,module in enumerate(self.input_blocks):
+            if i==2: now_cond = cond[0]
+                # x = module(x,cat_t_embs,cond[0])
+            if i==3: now_cond = cond[1]
+                # x = module(x,cat_t_embs,cond[1])
+            # else: x = module(x,cat_t_embs)
+            else: now_cond = None
+            
+            if isinstance(module, nn.ModuleList):
+                x = self._forward_nested_module_list(module, x, cat_t_embs, now_cond)
+            else:
+                x = module(x)            
+            
+            # for sub_module in module:
+            #     x = sub_module(x, cat_t_embs, now_cond)
+            
+            x_input_block.append(x)
         
-        x = self.input_blocks[1](x,cat_t_embs)
-        x_input_block.append(x)
+        # x = self.input_blocks[0](x,cat_t_embs)
+        # x_input_block.append(x)
         
-        x = self.input_blocks[2](x,cat_t_embs,cond[0])
-        x_input_block.append(x)
+        # x = self.input_blocks[1](x,cat_t_embs)
+        # x_input_block.append(x)
         
-        x = self.input_blocks[3](x,cat_t_embs,cond[1])
-        x_input_block.append(x)
+        # x = self.input_blocks[2](x,cat_t_embs,cond[0])
+        # x_input_block.append(x)
+        
+        # x = self.input_blocks[3](x,cat_t_embs,cond[1])
+        # x_input_block.append(x)
         
         # output half 
-        x = torch.cat([x, x_input_block.pop()], dim=1)
-        x = self.output_blocks[0](x, cat_t_embs, cond[2])
+        now_cond = None
+        for i,module in enumerate(self.output_blocks):
+            x = torch.cat([x, x_input_block.pop()], dim=1)
+            if i==0: now_cond = cond[2]
+                # x = module(x, cat_t_embs, cond[2])
+            if i==1: now_cond = cond[3]
+                # x = module(x, cat_t_embs, cond[3])
+            else: now_cond = None
+            
+            if isinstance(module, nn.ModuleList):
+                x = self._forward_nested_module_list(module, x)
+            else:
+                x = module(x)
+            
+            # for sub_module in module:                
+            #     x = sub_module(x, cat_t_embs, now_cond)
+            
+        # x = torch.cat([x, x_input_block.pop()], dim=1)
+        # x = self.output_blocks[0](x, cat_t_embs, cond[2])
         
-        x = torch.cat([x, x_input_block.pop()], dim=1)
-        x = self.output_blocks[1](x, cat_t_embs, cond[3])
+        # x = torch.cat([x, x_input_block.pop()], dim=1)
+        # x = self.output_blocks[1](x, cat_t_embs, cond[3])
         
-        x = torch.cat([x, x_input_block.pop()], dim=1)
-        x = self.output_blocks[2](x, cat_t_embs)
+        # x = torch.cat([x, x_input_block.pop()], dim=1)
+        # x = self.output_blocks[2](x, cat_t_embs)
         
-        x = torch.cat([x, x_input_block.pop()], dim=1)
-        x = self.output_blocks[3](x, cat_t_embs)
+        # x = torch.cat([x, x_input_block.pop()], dim=1)
+        # x = self.output_blocks[3](x, cat_t_embs)
         
         return  self.out(x)
+    
+    def _forward_nested(self,module_list,x,cat_t_embs,cond):
+        # pdb.set_trace()
+        for layer in module_list:
+            x = layer(x, cat_t_embs, cond)
+        return x
 
 class UnetB128(nn.Module):
     def __init__(self, *,
                  in_channels: int,
                  out_channels: int, #unused
                  channels: int,
-                 n_res_blocks: int,
+                #  n_res_blocks: int,
                 #  attention_levels: List[int], 
                  if_down: bool = False,
                 #  channels_multipliers: List[int],
@@ -340,9 +415,10 @@ class UnetB128(nn.Module):
         super().__init__()
         self.channels_multipliers = [1, 2, 4, 4]
         levels = len(self.channels_multipliers)
+        n_res_blocks = 3
         
         d_time_emb = channels * 4
-        in_channels = in_channels * (1 + 1 + if_down) # in_channels default as 4
+        in_channels = in_channels # in_channels default as 4, UNetB only input segmented garment
         
         self.time_embed = nn.Sequential(
             nn.Linear(channels, d_time_emb),
@@ -352,20 +428,22 @@ class UnetB128(nn.Module):
         
         self.attention_levels = []
         
-        self.conv = TimestepEmbedSequential(
-            nn.Conv2d(in_channels, channels, 3, padding=1))
+        self.conv = nn.Conv2d(in_channels, channels, 3, padding=1)
         
         self.input_blocks = nn.ModuleList()
         
-        
+        # self.input_blocks.append(TimestepEmbedSequential(
+        #     nn.Conv2d(in_channels, channels, 3, padding=1))) # maps the input to channels
+               
         input_block_channels = [channels]
         
         channels_list = [channels * m for m in self.channels_multipliers]
         
         for i in range(levels):
             sub_net = nn.ModuleList()
+            # sub_net = mySequential()
 
-            for _ in range(n_res_blocks):
+            for j in range(n_res_blocks):
                 
                 layers = [ResBlock(channels, d_time_emb, out_channels=channels_list[i])]
                 channels = channels_list[i]
@@ -374,9 +452,11 @@ class UnetB128(nn.Module):
                     layers.append(SpatialTransformer(channels, n_heads, tf_layers, d_cond))
                     
                 sub_net.append(TimestepEmbedSequential(*layers))
+                # sub_net.add_module(str(j),TimestepEmbedSequential(*layers))
                 input_block_channels.append(channels)
             if i != levels - 1:
                 sub_net.append(TimestepEmbedSequential(DownSample(channels)))
+                # sub_net.add_module(str(i),TimestepEmbedSequential(DownSample(channels)))
                 input_block_channels.append(channels)
             self.input_blocks.append(sub_net)
             
@@ -393,6 +473,7 @@ class UnetB128(nn.Module):
         for i in reversed(range(levels)):
             cnt += 1
             sub_net = nn.ModuleList()
+            # sub_net = mySequential()
             for j in range(n_res_blocks + 1):
                 layers = [ResBlock(channels + input_block_channels.pop(), d_time_emb, out_channels=channels_list[i])]
                 channels = channels_list[i]
@@ -404,6 +485,8 @@ class UnetB128(nn.Module):
                     layers.append(UpSample(channels))
                     
                 sub_net.append(TimestepEmbedSequential(*layers))
+                # sub_net.add_module(str(i),TimestepEmbedSequential(*layers))
+                
             self.output_blocks.append(sub_net)
             if cnt > 1: break
         
@@ -430,22 +513,46 @@ class UnetB128(nn.Module):
         x_input_block = []
         res = []
         
+        x = self.conv(x)
+        
         # t_emb = self.time_step_embedding(time_steps)
         # t_emb = self.time_embed(t_emb)
         
         # input half
+        ###################
+        # 0 mapping input to channels
+        # 1 block 1
+        # 2 block 2
+        # 3 block 3 whose output is needed
+        ###################
         cnt = 0
+        cond = None
         for module in self.input_blocks:
             cnt += 1
-            x = module(x, cat_t_embs)
+            # pdb.set_trace()
+            if isinstance(module, nn.ModuleList):
+                x = self._forward_nested(module, x, cat_t_embs, cond)
+            else:
+                x = module(x, cat_t_embs, cond)
+                    
             x_input_block.append(x)
-            if(cnt > 2): res.append(x)
+            if(cnt > 3): res.append(x)
             
         for module in self.output_blocks:
             x = torch.cat([x,x_input_block.pop()],dim=1)
-            x = module(x, cat_t_embs)
+            
+            if isinstance(module, nn.ModuleList):
+                x = self._forward_nested(module, x, cat_t_embs, cond)            
+            # for sub_module in module:
+            #     x = sub_module(x, cat_t_embs, cond)
             res.append(x)
         
         return res
+    
+    def _forward_nested(self,module_list,x,cat_t_embs,cond):
+        # pdb.set_trace()
+        for layer in module_list:
+            x = layer(x, cat_t_embs, cond)
+        return x
         
         

@@ -54,7 +54,7 @@ def get_opts():
     ### data related
     parser.add_argument('--root_dir', type=str, required=True,
                         help='root directory of dataset')
-    parser.add_argument('--size', type=int, default=128,
+    parser.add_argument('--size', type=int, default=256,
                         help='input image size(height==width)')
     
 
