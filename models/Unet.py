@@ -75,6 +75,7 @@ class ResBlock(nn.Module):
         # Initial convolution
         h = self.in_layers(x)
         # Time step embeddings
+        # pdb.set_trace()
         t_emb = self.emb_layers(t_emb).type(h.dtype)
         # Add time step embeddings
         h = h + t_emb[:, :, None, None]
@@ -94,7 +95,7 @@ class TimestepEmbedSequential(nn.Sequential):
     def forward(self, x, t_emb, cond=None):
         for layer in self:
             if isinstance(layer, ResBlock):
-                pdb.set_trace()
+                # pdb.set_trace()
                 x = layer(x, t_emb)
             elif isinstance(layer, SpatialTransformer):
                 x = layer(x, cond)
@@ -219,14 +220,14 @@ class UnetA128(nn.Module):
         
         levels = len(self.channels_multipliers)
         
-        d_time_emb = channels * 4
+        d_time_emb = channels * 4 * 3
         in_channels = in_channels * (1 + 1 + if_down) # in_channels default as 4
         
-        self.time_embed = nn.Sequential(
-            nn.Linear(channels, d_time_emb),
-            nn.SiLU(),
-            nn.Linear(d_time_emb, d_time_emb),
-        )
+        # self.time_embed = nn.Sequential(
+        #     nn.Linear(channels, d_time_emb),
+        #     nn.SiLU(),
+        #     nn.Linear(d_time_emb, d_time_emb),
+        # )
         
         self.conv = nn.Conv2d(in_channels, channels, 3, padding=1)
         
@@ -310,7 +311,7 @@ class UnetA128(nn.Module):
         
     def forward(self, x: torch.Tensor, cat_t_embs: torch.Tensor, cond: List[torch.Tensor]):
         
-        x_input_block = []
+        self.x_input_block = []
         
         # t_emb = self.time_step_embedding(time_steps)
         # t_emb = self.time_embed(t_emb)
@@ -328,14 +329,14 @@ class UnetA128(nn.Module):
             else: now_cond = None
             
             if isinstance(module, nn.ModuleList):
-                x = self._forward_nested_module_list(module, x, cat_t_embs, now_cond)
+                x = self._forward_nested(module, x, cat_t_embs, now_cond)
             else:
                 x = module(x)            
             
             # for sub_module in module:
             #     x = sub_module(x, cat_t_embs, now_cond)
             
-            x_input_block.append(x)
+            self.x_input_block.append(x)
         
         # x = self.input_blocks[0](x,cat_t_embs)
         # x_input_block.append(x)
@@ -352,7 +353,7 @@ class UnetA128(nn.Module):
         # output half 
         now_cond = None
         for i,module in enumerate(self.output_blocks):
-            x = torch.cat([x, x_input_block.pop()], dim=1)
+            # x = torch.cat([x, x_input_block.pop()], dim=1)
             if i==0: now_cond = cond[2]
                 # x = module(x, cat_t_embs, cond[2])
             if i==1: now_cond = cond[3]
@@ -360,7 +361,7 @@ class UnetA128(nn.Module):
             else: now_cond = None
             
             if isinstance(module, nn.ModuleList):
-                x = self._forward_nested_module_list(module, x)
+                x = self._forward_nested_output(module, x)
             else:
                 x = module(x)
             
@@ -384,6 +385,14 @@ class UnetA128(nn.Module):
     def _forward_nested(self,module_list,x,cat_t_embs,cond):
         # pdb.set_trace()
         for layer in module_list:
+            # x = torch.cat([x, self.x_input_block.pop()], dim=1)
+            x = layer(x, cat_t_embs, cond)
+        return x
+    
+    def _forward_nested_output(self,module_list,x,cat_t_embs,cond):
+        # pdb.set_trace()
+        for layer in module_list:
+            x = torch.cat([x, self.x_input_block.pop()], dim=1)
             x = layer(x, cat_t_embs, cond)
         return x
 
@@ -417,14 +426,14 @@ class UnetB128(nn.Module):
         levels = len(self.channels_multipliers)
         n_res_blocks = 3
         
-        d_time_emb = channels * 4
+        d_time_emb = channels * 4 * 3 # * 3 for cat_time_emb 
         in_channels = in_channels # in_channels default as 4, UNetB only input segmented garment
         
-        self.time_embed = nn.Sequential(
-            nn.Linear(channels, d_time_emb),
-            nn.SiLU(),
-            nn.Linear(d_time_emb, d_time_emb),
-        )
+        # self.time_embed = nn.Sequential(
+        #     nn.Linear(channels, d_time_emb),
+        #     nn.SiLU(),
+        #     nn.Linear(d_time_emb, d_time_emb),
+        # )
         
         self.attention_levels = []
         
@@ -510,7 +519,7 @@ class UnetB128(nn.Module):
         
     def forward(self, x: torch.Tensor, cat_t_embs: torch.Tensor):
         
-        x_input_block = []
+        self.x_input_block = []
         res = []
         
         x = self.conv(x)
@@ -520,7 +529,6 @@ class UnetB128(nn.Module):
         
         # input half
         ###################
-        # 0 mapping input to channels
         # 1 block 1
         # 2 block 2
         # 3 block 3 whose output is needed
@@ -535,14 +543,15 @@ class UnetB128(nn.Module):
             else:
                 x = module(x, cat_t_embs, cond)
                     
-            x_input_block.append(x)
-            if(cnt > 3): res.append(x)
+            self.x_input_block.append(x)
+            if(cnt > 2): res.append(x)
             
+        pdb.set_trace()   
         for module in self.output_blocks:
-            x = torch.cat([x,x_input_block.pop()],dim=1)
-            
+            # x = torch.cat([x,x_input_block.pop()],dim=1)
+            # x:[1,2560,32,32] 1280+1280
             if isinstance(module, nn.ModuleList):
-                x = self._forward_nested(module, x, cat_t_embs, cond)            
+                x = self._forward_nested_output(module, x, cat_t_embs, cond)            
             # for sub_module in module:
             #     x = sub_module(x, cat_t_embs, cond)
             res.append(x)
@@ -552,6 +561,14 @@ class UnetB128(nn.Module):
     def _forward_nested(self,module_list,x,cat_t_embs,cond):
         # pdb.set_trace()
         for layer in module_list:
+            # x = torch.cat([x,self.x_input_block.pop()],dim=1)
+            x = layer(x, cat_t_embs, cond)
+        return x
+    
+    def _forward_nested_output(self,module_list,x,cat_t_embs,cond):
+        # pdb.set_trace()
+        for layer in module_list:
+            x = torch.cat([x,self.x_input_block.pop()],dim=1)
             x = layer(x, cat_t_embs, cond)
         return x
         

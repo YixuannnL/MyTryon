@@ -306,6 +306,7 @@ if __name__ == '__main__':
                       progress_bar_refresh_rate=1,
                       enable_model_summary=True,
                       gpus=hparams.num_gpus,
+                    #   gpus = [1],
                     #   distributed_backend='ddp' if hparams.num_gpus>1 else None,
                       num_sanity_val_steps=1,
                       benchmark=True)

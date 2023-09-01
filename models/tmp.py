@@ -1,38 +1,19 @@
-import torch
-import torch.nn as nn
+from PIL import Image
+import os
 
-import pdb
+path = '/home/lyx/Code/Data/frameData/C0098/0010.jpg'
+image = Image.open(path)
 
-class MyModel(nn.Module):
-    def __init__(self):
-        super(MyModel, self).__init__()
+width, height = image.size
 
-        self.nested_layers = nn.ModuleList([
-            nn.Linear(100, 50),
-            nn.ModuleList([
-                nn.Sequential(
-                        nn.Linear(50, 30),
-                        nn.ReLU()),
-                nn.Linear(30, 10)
-            ])
-        ])
+left = (width - 1080) // 2
+top = (height - 1080) // 2
 
-    def forward(self, x):
-        for layer in self.nested_layers:
-            pdb.set_trace()
-            if isinstance(layer, nn.ModuleList):
-                x = self._forward_nested_module_list(layer, x)
-            else:
-                x = layer(x)
-        return x
+right = left + 1080
+bottom = top + 1080
 
-    def _forward_nested_module_list(self, module_list, x):
-        for layer in module_list:
-            x = layer(x)
-        return x
-    
-if __name__ == '__main__':
-    model = MyModel()
-    x = torch.Tensor(size=(10,100))
-    result = model(x)
-    print(result.shape)
+cropped_image = image.crop((left, top, right, bottom))
+
+output_path = '/home/lyx/Code/Data/crop1.jpg'
+
+cropped_image.save(output_path)
